@@ -2,21 +2,17 @@ import React from "react";
 import styles from "./NetworkSwitcher.module.css";
 
 const NetworkSwitcher = () => {
-  const currentHost = window.location.hostname;
-
-  // Determine current network based on subdomain
-  const getCurrentNetwork = () => {
-    if (currentHost.includes("lynx")) return "lynx";
-    if (currentHost.includes("tapir")) return "tapir";
+  const currentNetwork = import.meta.env.VITE_NETWORK || (() => {
+    const host = window.location.hostname;
+    if (host.includes("lynx")) return "lynx";
+    if (host.includes("tapir")) return "tapir";
     return "mainnet";
-  };
-
-  const currentNetwork = getCurrentNetwork();
+  })();
 
   const networks = [
-    { id: "mainnet", name: "Mainnet", url: "https://tacoscan.io",      color: "#10B981", description: "Mainnet" },
-    { id: "lynx",    name: "Lynx",    url: "https://lynx.tacoscan.io", color: "#FBBf24", description: "Lynx Testnet" },
-    { id: "tapir",   name: "Tapir",   url: "https://tapir.tacoscan.io",color: "#8B5CF6", description: "Tapir Testnet" },
+    { id: "mainnet", name: "Mainnet", url: import.meta.env.VITE_MAINNET_URL || "https://tacoscan.io",       color: "#10B981", description: "Mainnet" },
+    { id: "lynx",    name: "Lynx",    url: import.meta.env.VITE_LYNX_URL    || "https://lynx.tacoscan.io",  color: "#FBBf24", description: "Lynx Testnet" },
+    { id: "tapir",   name: "Tapir",   url: import.meta.env.VITE_TAPIR_URL   || "https://tapir.tacoscan.io", color: "#8B5CF6", description: "Tapir Testnet" },
   ];
 
   const handleNetworkSwitch = (url) => {
