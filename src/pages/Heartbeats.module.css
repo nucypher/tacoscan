@@ -454,46 +454,52 @@
   font-family: var(--font-mono, 'Space Mono', monospace);
 }
 
-/* Heartbeat Heatmap */
+/* Heartbeat Heatmap — compact SVG */
 .heatmapSection {
-  background: var(--bg-primary);
+  background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  padding: 12px 16px;
+  padding: 10px 14px;
   margin-bottom: 16px;
 }
 
-.heatmapGrid {
+.heatmapHeader {
   display: flex;
-  gap: 3px;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.heatmapTitle {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--text-secondary);
+}
+
+.heatmapSvgWrap {
   width: 100%;
-  padding: 4px 0;
-}
-
-.heatmapCol {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.heatmapCell {
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  border-radius: 2px;
-  cursor: default;
-}
-
-.heatmapCell:hover {
-  outline: 1px solid var(--text-secondary);
+  overflow: hidden;
 }
 
 .heatmapLegend {
   display: flex;
   align-items: center;
+  gap: 8px;
+}
+
+.legendItem {
+  display: flex;
+  align-items: center;
   gap: 3px;
-  margin-bottom: 8px;
-  justify-content: flex-end;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.legendRight {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-left: 4px;
 }
 
