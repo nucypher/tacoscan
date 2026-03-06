@@ -1,7 +1,7 @@
 .link {
   cursor: pointer;
   transition: color 0.2s ease;
-  font-family: "Work Sans", sans-serif;
+  font-family: var(--font-sans);
 }
 
 .underlineAlways {
@@ -21,19 +21,19 @@
 }
 
 .primary {
-  color: #0A0A0A;
+  color: var(--text-primary);
 }
 
 .primary:hover {
-  color: #5A5A5A;
+  color: var(--text-secondary);
 }
 
 .secondary {
-  color: #dc004e;
+  color: #ef4444;
 }
 
 .secondary:hover {
-  color: #c51162;
+  color: #ef4444;
 }
 
 .inherit {

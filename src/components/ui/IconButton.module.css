@@ -34,15 +34,15 @@
 }
 
 .primary {
-  color: #96FF5E;
+  color: var(--accent-green);
 }
 
 .primary:hover:not(.disabled) {
-  background-color: rgba(150, 255, 94, 0.04);
+  background-color: rgba(74, 222, 128, 0.04);
 }
 
 .secondary {
-  color: #dc004e;
+  color: #ef4444;
 }
 
 .secondary:hover:not(.disabled) {

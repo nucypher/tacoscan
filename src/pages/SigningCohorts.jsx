@@ -1,37 +1,231 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import styles from './SigningCohorts.module.css';
-import { formatString, formatDate, calculateTimeMoment } from './data';
-import { getAllSigningCohorts } from '../utils/contractReader';
-import { getCurrentNetwork } from '../utils/dataSource';
+import { calculateTimeMoment, getSigningCohortsFromSubgraph } from './data';
+import PageHeader from '../components/PageHeader';
+import { ListSkeleton } from '../components/Skeleton';
 
+// ── Condition hex decoder ─────────────────────────────────────────────────────
+function decodeConditions(hex) {
+  if (!hex || hex === '0x') return null;
+  try {
+    const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+    const bytes = new Uint8Array(clean.match(/.{1,2}/g).map((b) => parseInt(b, 16)));
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+}
+
+// ── Compact policy summarizer ─────────────────────────────────────────────────
+const TYPE_COLOR = {
+  ecdsa:               '#9b7fe8',
+  jwt:                 '#b07fe8',
+  time:                '#d4915a',
+  json:                '#5b9bd5',
+  'json-rpc':          '#5b9bd5',
+  'context-variable':  '#888',
+  context:             '#888',
+  'signing-attribute': '#3a7d5e',
+  'signing-abi-attribute': '#c0564a',
+  contract:            '#c0564a',
+  compound:            '#999',
+  sequential:          '#5baaaa',
+};
+
+const TYPE_LABEL = {
+  ecdsa:               'ecdsa',
+  jwt:                 'jwt',
+  time:                'time',
+  json:                'json',
+  'json-rpc':          'json',
+  'context-variable':  'ctx',
+  context:             'ctx',
+  'signing-attribute': 'signing',
+  'signing-abi-attribute': 'txlimit',
+  contract:            'contract',
+  compound:            'compound',
+  sequential:          'seq',
+};
+
+// Collect all leaf condition types recursively (deduplicated)
+function collectTypes(cond, out = new Set()) {
+  if (!cond) return out;
+  const t = cond.conditionType || '';
+  if (t === 'compound') {
+    (cond.operands || []).forEach((o) => collectTypes(o, out));
+  } else if (t === 'sequential') {
+    (cond.conditionVariables || []).forEach((s) => collectTypes(s.condition || s, out));
+  } else if (t) {
+    out.add(t);
+  }
+  return out;
+}
+
+function extractToken(varName) {
+  const u = varName.toUpperCase();
+  for (const t of ['USDC', 'USDT', 'ETH', 'DAI', 'WETH', 'WBTC', 'BTC']) {
+    if (u.includes(t)) return t;
+  }
+  return null;
+}
+
+function extractAmount(step) {
+  const rvt = step?.condition?.returnValueTest;
+  if (!rvt) return null;
+  const c = rvt.comparator;
+  if (c === '>=' || c === '>' || c === '==') return `${c} ${rvt.value}`;
+  return null;
+}
+
+function recipientPath(steps) {
+  const hasContract = steps.some((s) => s.condition?.conditionType === 'contract');
+  const hasSalt = steps.some((s) => (s.varName || '').toLowerCase().includes('salt'));
+  return hasContract || hasSalt ? 'contract-derived' : 'direct';
+}
+
+function summarizeCondition(cond) {
+  if (!cond) return null;
+  const t = cond.conditionType || '';
+
+  if (t === 'compound') {
+    const op = (cond.operator || 'and').toLowerCase();
+    const operands = cond.operands || [];
+
+    if (op === 'or') {
+      const allEcdsa = operands.length > 0 && operands.every((o) => o.conditionType === 'ecdsa');
+      if (allEcdsa) {
+        const src = (operands[0]?.message || '').toLowerCase().includes('discord') ? 'Discord ' : '';
+        return `${src}Signatories — any 1 of ${operands.length}`;
+      }
+      const allSeqTx = operands.every((o) => {
+        const steps = o.conditionVariables || [];
+        return o.conditionType === 'sequential' &&
+          steps.some((s) => s.condition?.conditionType === 'signing-abi-attribute');
+      });
+      if (allSeqTx) {
+        const firstSteps = operands[0].conditionVariables || [];
+        const amtStep = firstSteps.find((s) => {
+          const v = (s.varName || '').toLowerCase();
+          return v.includes('amount') || v.includes('value');
+        });
+        const token = amtStep ? extractToken(amtStep.varName || '') : null;
+        const amt = amtStep ? extractAmount(amtStep) : null;
+        return `${token || 'Token'} transfer${amt ? ' ' + amt : ''} — any route`;
+      }
+      return `Any of ${operands.length} conditions`;
+    }
+
+    // AND
+    const parts = operands.map((o) => summarizeCondition(o)).filter(Boolean);
+    return parts.length > 1 ? parts.join(' + ') : parts[0] || 'Compound';
+  }
+
+  if (t === 'sequential') {
+    const steps = cond.conditionVariables || [];
+    const types = steps.map((s) => s.condition?.conditionType || '');
+    if (types.includes('signing-abi-attribute')) {
+      const amtStep = steps.find((s) => {
+        const v = (s.varName || '').toLowerCase();
+        return v.includes('amount') || v.includes('value');
+      });
+      const token = amtStep ? extractToken(amtStep.varName || '') : null;
+      const amt = amtStep ? extractAmount(amtStep) : null;
+      const path = recipientPath(steps);
+      return `${token || 'Token'} transfer${amt ? ' ' + amt : ''}, ${path} recipient`;
+    }
+    if (types.includes('time') && steps.some((s) =>
+      ['account', 'sender', 'discord', 'age'].some((k) => (s.varName || '').toLowerCase().includes(k))
+    )) {
+      return 'Signatory identity + time check';
+    }
+    return `${steps.length}-step verification`;
+  }
+
+  if (t === 'ecdsa') {
+    const src = (cond.message || '').toLowerCase().includes('discord') ? 'Discord ' : '';
+    return `${src}ECDSA signature`;
+  }
+  if (t === 'time') return 'Time window';
+  if (t === 'json' || t === 'json-rpc') {
+    const q = cond.query || cond.endpoint || '';
+    if (q.includes('user.id')) return 'Discord membership check';
+    return 'JSON data check';
+  }
+  if (t === 'signing-attribute') return `Signing: ${cond.attributeName || ''}`;
+  if (t === 'signing-abi-attribute') return 'Transaction whitelist';
+  if (t === 'jwt') return 'JWT token';
+  if (t === 'contract') return 'On-chain check';
+  return t || null;
+}
+
+// ── Chain label helpers ───────────────────────────────────────────────────────
+const CHAIN_LABELS = {
+  '1':        'ETH',
+  '137':      'POLY',
+  '8453':     'BASE',
+  '11155111': 'SEPOLIA',
+  '84532':    'BASE-SEP',
+  '80001':    'MUMBAI',
+};
+
+function chainLabel(chainId) {
+  return CHAIN_LABELS[String(chainId)] || (chainId ? `chain:${chainId}` : '');
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 const SigningCohorts = () => {
   const navigate = useNavigate();
   const [cohorts, setCohorts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState('id');
   const [sortOrder, setSortOrder] = useState('desc');
-  const [expandedConditions, setExpandedConditions] = useState({});
 
   useEffect(() => {
     const fetchCohorts = async () => {
       try {
-        const network = getCurrentNetwork();
-        console.log(`Fetching signing cohorts for ${network}...`);
+        const cohortsData = await getSigningCohortsFromSubgraph();
 
-        const cohortsData = await getAllSigningCohorts(network);
+        const transformedCohorts = cohortsData.map((cohort) => {
+          const signers = cohort.multisig?.signers?.length
+            ? cohort.multisig.signers
+            : cohort.signers?.length ? cohort.signers : (cohort.participants || []);
+          const decodedCond = decodeConditions(cohort.conditions);
+          const conditionRoot = decodedCond?.condition || decodedCond;
+          const leafTypes = conditionRoot ? [...collectTypes(conditionRoot)] : [];
+          const policySummary = conditionRoot ? summarizeCondition(conditionRoot) : null;
 
-        // Transform the data for display
-        const transformedCohorts = cohortsData.map(cohort => ({
-          id: cohort.id,
-          name: `Cohort #${cohort.id}`,
-          signers: cohort.signers || [],
-          threshold: cohort.threshold,
-          isActive: cohort.isActive,
-          state: cohort.state,
-          signersCount: cohort.signersCount || 0,
-          conditions: cohort.conditions
-        }));
+          return {
+            id: cohort.id,
+            signers,
+            signersCount: signers.length,
+            threshold: cohort.multisig?.threshold || cohort.threshold || 0,
+            isActive: cohort.status === 'DEPLOYED' || cohort.status === 'CONDITIONS_SET',
+            state: cohort.status?.replace(/_/g, ' ') || 'Unknown',
+            authority: cohort.authority,
+            chainId: cohort.chainId,
+            isDeployed: cohort.isDeployed,
+            deployedAt: cohort.deployedAt,
+            multisigAddress: cohort.multisigAddress,
+            signatureCount: (cohort.signatures || []).length,
+            createdAt: cohort.createdAt,
+            executionCount: cohort.multisig?.executionCount || 0,
+            totalValue: cohort.multisig?.totalValue || '0',
+            lastExecutedAt: cohort.multisig?.lastExecutedAt,
+            // Policy data
+            hasConditions: !!conditionRoot,
+            policySummary,
+            leafTypes,
+            complexityScore: leafTypes.length,
+          };
+        });
+
+        // Sort: conditions set first, then by complexity, then by id desc
+        transformedCohorts.sort((a, b) => {
+          if (a.hasConditions !== b.hasConditions) return a.hasConditions ? -1 : 1;
+          if (b.complexityScore !== a.complexityScore) return b.complexityScore - a.complexityScore;
+          return parseInt(b.id) - parseInt(a.id);
+        });
 
         setCohorts(transformedCohorts);
       } catch (error) {
@@ -55,333 +249,157 @@ const SigningCohorts = () => {
   };
 
   const sortedCohorts = [...cohorts].sort((a, b) => {
+    if (sortBy === 'id') {
+      const diff = parseInt(a.id) - parseInt(b.id);
+      return sortOrder === 'asc' ? diff : -diff;
+    }
+    if (sortBy === 'signers') {
+      return sortOrder === 'asc' ? a.signersCount - b.signersCount : b.signersCount - a.signersCount;
+    }
+    if (sortBy === 'complexity') {
+      return sortOrder === 'asc' ? a.complexityScore - b.complexityScore : b.complexityScore - a.complexityScore;
+    }
+    if (sortBy === 'executionCount') {
+      return sortOrder === 'asc' ? a.executionCount - b.executionCount : b.executionCount - a.executionCount;
+    }
     const aVal = a[sortBy];
     const bVal = b[sortBy];
-
-    if (sortBy === 'signers') {
-      const aLen = a.signersCount;
-      const bLen = b.signersCount;
-      return sortOrder === 'asc' ? aLen - bLen : bLen - aLen;
-    }
-
-    if (typeof aVal === 'number') {
-      return sortOrder === 'asc' ? aVal - bVal : bVal - aVal;
-    }
-
     if (typeof aVal === 'boolean') {
       return sortOrder === 'asc'
         ? (aVal === bVal ? 0 : aVal ? -1 : 1)
         : (aVal === bVal ? 0 : aVal ? 1 : -1);
     }
-
     return sortOrder === 'asc'
       ? String(aVal).localeCompare(String(bVal))
       : String(bVal).localeCompare(String(aVal));
   });
 
-  if (loading) {
-    return (
-      <div className={styles.container}>
-        <div className={styles.loading}>Loading signing cohorts...</div>
-      </div>
-    );
-  }
+  const sortIndicator = (field) =>
+    sortBy === field ? (sortOrder === 'asc' ? ' ↑' : ' ↓') : '';
+
+  if (loading) return <ListSkeleton cols={5} rows={10} />;
 
   return (
     <div className={styles.signingCohorts}>
       <div className={styles.container}>
-        <div className={styles.header}>
-          <div>
-            <h1 className={styles.title}>Signing Cohorts</h1>
-            <p className={styles.subtitle}>
-              Groups of nodes authorized to perform threshold signing operations
-            </p>
-          </div>
-        </div>
+        <PageHeader
+          title="Signing Cohorts"
+          subtitle="Groups of nodes authorized to perform threshold signing operations"
+          stats={[
+            { label: 'Total', value: cohorts.length },
+            { label: 'Active', value: cohorts.filter((c) => c.isActive).length },
+            { label: 'Total Signers', value: cohorts.reduce((s, c) => s + c.signersCount, 0) },
+            { label: 'With Conditions', value: cohorts.filter((c) => c.hasConditions).length },
+            { label: 'Deployed', value: cohorts.filter((c) => c.isDeployed).length },
+          ]}
+        />
 
-      <div className={styles.stats}>
-        <div className={styles.statCard}>
-          <div className={styles.statValue}>{cohorts.length}</div>
-          <div className={styles.statLabel}>Total Cohorts</div>
-        </div>
-        <div className={styles.statCard}>
-          <div className={styles.statValue}>
-            {cohorts.filter(c => c.isActive).length}
-          </div>
-          <div className={styles.statLabel}>Active Cohorts</div>
-        </div>
-        <div className={styles.statCard}>
-          <div className={styles.statValue}>
-            {cohorts.reduce((sum, c) => sum + c.signersCount, 0)}
-          </div>
-          <div className={styles.statLabel}>Total Signers</div>
-        </div>
-      </div>
-
-      <div className={styles.tableContainer}>
-        <table className={styles.table}>
-          <thead>
-            <tr>
-              <th onClick={() => handleSort('id')} className={styles.sortable}>
-                ID {sortBy === 'id' && (sortOrder === 'asc' ? '↑' : '↓')}
-              </th>
-              <th onClick={() => handleSort('name')} className={styles.sortable}>
-                Name {sortBy === 'name' && (sortOrder === 'asc' ? '↑' : '↓')}
-              </th>
-              <th onClick={() => handleSort('signers')} className={styles.sortable}>
-                Signers {sortBy === 'signers' && (sortOrder === 'asc' ? '↑' : '↓')}
-              </th>
-              <th onClick={() => handleSort('threshold')} className={styles.sortable}>
-                Threshold {sortBy === 'threshold' && (sortOrder === 'asc' ? '↑' : '↓')}
-              </th>
-              <th onClick={() => handleSort('state')} className={styles.sortable}>
-                State {sortBy === 'state' && (sortOrder === 'asc' ? '↑' : '↓')}
-              </th>
-              <th>Policies</th>
-              <th onClick={() => handleSort('isActive')} className={styles.sortable}>
-                Status {sortBy === 'isActive' && (sortOrder === 'asc' ? '↑' : '↓')}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {sortedCohorts.map((cohort) => (
-              <tr
-                key={cohort.id}
-                onClick={() => navigate(`/cohort/${cohort.id}`)}
-                className={styles.clickableRow}
-              >
-                <td className={styles.idCell}>{cohort.id}</td>
-                <td className={styles.nameCell}>{cohort.name}</td>
-                <td className={styles.membersCell}>
-                  <span className={styles.memberCount}>{cohort.signersCount} signers</span>
-                </td>
-                <td className={styles.thresholdCell}>
-                  {cohort.threshold}/{cohort.signersCount}
-                </td>
-                <td className={styles.stateCell}>
-                  {cohort.state || 'Unknown'}
-                </td>
-                <td className={styles.conditionsCell}>
-                  {cohort.conditions && typeof cohort.conditions === 'object' && Object.keys(cohort.conditions).length > 0 ? (
-                    <div className={styles.conditionsWrapper}>
-                      <button
-                        className={styles.conditionsToggle}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setExpandedConditions(prev => ({
-                            ...prev,
-                            [cohort.id]: !prev[cohort.id]
-                          }));
-                        }}
-                      >
-                        <span className={styles.conditionsBadge}>
-                          {Object.keys(cohort.conditions).length} chain{Object.keys(cohort.conditions).length !== 1 ? 's' : ''}
-                        </span>
-                        <span className={styles.expandIcon}>
-                          {expandedConditions[cohort.id] ? '▼' : '▶'}
-                        </span>
-                      </button>
-                      {expandedConditions[cohort.id] && (
-                        <div className={styles.conditionsDropdown}>
-                          {Object.entries(cohort.conditions).map(([chainId, chainConditions]) => {
-                            const chainName =
-                              chainId === '11155111' ? 'Sepolia' :
-                              chainId === '80002' ? 'Polygon Amoy' :
-                              chainId === '84532' ? 'Base Sepolia' :
-                              chainId === '1' ? 'Ethereum' :
-                              `Chain ${chainId}`;
-
-                            return (
-                              <div key={chainId} className={styles.chainConditionGroup}>
-                                <div className={styles.chainConditionHeader}>{chainName}</div>
-                                {(() => {
-                                  const conditionData = chainConditions?.decoded || chainConditions;
-
-                                  if (conditionData && typeof conditionData === 'object') {
-                                    // Extract condition details
-                                    const condition = conditionData.condition || conditionData;
-                                    const conditionType = condition.conditionType || 'Complex Condition';
-                                    const version = conditionData.version || '';
-
-                                    // Get icon for condition type
-                                    const getIcon = (type) => {
-                                      const typeLower = type.toLowerCase();
-                                      if (typeLower.includes('contract')) return '📜';
-                                      if (typeLower.includes('time')) return '⏰';
-                                      if (typeLower.includes('compound')) return '🔗';
-                                      if (typeLower.includes('signing')) return '✍️';
-                                      return '📋';
-                                    };
-
-                                    // Get summary details
-                                    const getSummary = () => {
-                                      // ECDSA conditions
-                                      if (condition.verifyingKey) {
-                                        return `Key: ${formatString(condition.verifyingKey)}`;
-                                      }
-
-                                      // Signing ABI attribute conditions (calldata checks)
-                                      if (condition.abiValidation?.allowedAbiCalls) {
-                                        const abiCalls = Object.entries(condition.abiValidation.allowedAbiCalls);
-                                        if (abiCalls.length > 0) {
-                                          const [signature] = abiCalls[0];
-                                          const funcMatch = signature.match(/^(\w+)\(/);
-                                          const funcName = funcMatch ? funcMatch[1] : signature;
-
-                                          // Describe common patterns
-                                          if (funcName === 'transfer' || funcName === 'transferFrom') {
-                                            return '💸 Max transfer';
-                                          } else if (funcName === 'approve') {
-                                            return '✅ Approval limit';
-                                          } else if (funcName === 'execute' || funcName === 'execTransaction') {
-                                            // Check if there's a value limit in the validations
-                                            const [, validations] = abiCalls[0];
-                                            const hasValueLimit = validations?.some(v =>
-                                              v.indexWithinTuple === 1 || // uint256 value in tuple
-                                              (v.parameterIndex === 0 && v.returnValueTest?.comparator === '<') // or limiting the whole param
-                                            );
-                                            return hasValueLimit ? '💰 Max transaction value' : '🔒 Execute limits';
-                                          } else if (funcName.includes('swap')) {
-                                            return '🔄 Swap limits';
-                                          } else if (funcName === 'withdraw') {
-                                            return '🏦 Withdrawal limit';
-                                          } else if (funcName === 'stake' || funcName === 'unstake') {
-                                            return `🎯 ${funcName} limit`;
-                                          } else if (funcName === 'multicall' || funcName === 'batchExecute') {
-                                            return '📦 Batch limits';
-                                          } else {
-                                            return `🔧 ${funcName} limits`;
-                                          }
-                                        }
-                                      }
-
-                                      // Regular signing attribute conditions
-                                      if (condition.attributeName) {
-                                        const attr = condition.attributeName;
-                                        if (attr === 'call_data' && !condition.abiValidation) {
-                                          return 'Calldata validation';
-                                        }
-                                        if (attr === 'balance' && condition.returnValueTest) {
-                                          const val = condition.returnValueTest.value;
-                                          if (val > 1e15) {
-                                            return `ETH ${condition.returnValueTest.comparator} ${(val / 1e18).toFixed(4)}`;
-                                          }
-                                        }
-                                        return `Check: ${attr}`;
-                                      }
-
-                                      // Contract function calls
-                                      if (condition.functionAbi?.name) {
-                                        const funcName = condition.functionAbi.name;
-                                        if (funcName === 'balanceOf') {
-                                          return 'Token balance check';
-                                        } else if (funcName === 'ownerOf') {
-                                          return 'NFT ownership check';
-                                        } else if (funcName === 'hasRole') {
-                                          return 'Role verification';
-                                        }
-                                        return `${funcName}()`;
-                                      }
-
-                                      // Time conditions
-                                      if (condition.timeframe) {
-                                        if (condition.timeframe.start && condition.timeframe.end) {
-                                          return 'Time window';
-                                        }
-                                        return 'Time check';
-                                      }
-
-                                      // Compound conditions
-                                      if (condition.operands?.length) {
-                                        return `${condition.operator || 'Compound'}: ${condition.operands.length} policies`;
-                                      }
-
-                                      if (condition.endpoint) {
-                                        try {
-                                          return new URL(condition.endpoint).hostname;
-                                        } catch {
-                                          return 'API call';
-                                        }
-                                      }
-
-                                      if (condition.contractAddress) {
-                                        return formatString(condition.contractAddress);
-                                      }
-
-                                      return null;
-                                    };
-
-                                    const summary = getSummary();
-
-                                    // For signing-abi-attribute, just show the limit summary
-                                    if (conditionType === 'signing-abi-attribute' && summary) {
-                                      return (
-                                        <div className={styles.conditionSummary}>
-                                          <div className={styles.conditionDetail} style={{marginLeft: 0}}>
-                                            <span className={styles.conditionIcon}>{getIcon(conditionType)}</span>
-                                            {' '}{summary}
-                                          </div>
-                                        </div>
-                                      );
-                                    }
-
-                                    return (
-                                      <div className={styles.conditionSummary}>
-                                        <div className={styles.conditionTypeRow}>
-                                          <span className={styles.conditionIcon}>{getIcon(conditionType)}</span>
-                                          <span className={styles.conditionType}>{conditionType}</span>
-                                        </div>
-                                        {summary && (
-                                          <div className={styles.conditionDetail}>{summary}</div>
-                                        )}
-                                        {version && (
-                                          <div className={styles.conditionVersion}>v{version}</div>
-                                        )}
-                                      </div>
-                                    );
-                                  }
-
-                                  if (typeof conditionData === 'string' && conditionData.length > 0) {
-                                    return (
-                                      <div className={styles.conditionItem}>
-                                        <span className={styles.conditionValue}>{conditionData.slice(0, 50)}...</span>
-                                      </div>
-                                    );
-                                  }
-
-                                  if (chainConditions?.raw && chainConditions.raw !== '0x') {
-                                    return (
-                                      <div className={styles.conditionItem}>
-                                        <span className={styles.conditionValue} style={{fontSize: '10px'}}>
-                                          Encrypted policies
-                                        </span>
-                                      </div>
-                                    );
-                                  }
-
-                                  return <span className={styles.noConditions}>No data</span>;
-                                })()}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <span className={styles.noConditions}>None</span>
-                  )}
-                </td>
-                <td className={styles.statusCell}>
-                  <span className={`${styles.status} ${cohort.isActive ? styles.active : styles.inactive}`}>
-                    {cohort.isActive ? 'Active' : 'Inactive'}
-                  </span>
-                </td>
+        <div className={styles.tableContainer}>
+          <table className={styles.table}>
+            <thead>
+              <tr>
+                <th onClick={() => handleSort('id')} className={styles.sortable}>
+                  #{sortIndicator('id')}
+                </th>
+                <th onClick={() => handleSort('complexity')} className={styles.sortable}>
+                  Policy / Conditions{sortIndicator('complexity')}
+                </th>
+                <th onClick={() => handleSort('signers')} className={styles.sortable}>
+                  Nodes{sortIndicator('signers')}
+                </th>
+                <th>Threshold</th>
+                <th onClick={() => handleSort('state')} className={styles.sortable}>
+                  State{sortIndicator('state')}
+                </th>
+                <th onClick={() => handleSort('executionCount')} className={styles.sortable}>
+                  Execs{sortIndicator('executionCount')}
+                </th>
+                <th onClick={() => handleSort('createdAt')} className={styles.sortable}>
+                  Created{sortIndicator('createdAt')}
+                </th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {sortedCohorts.map((cohort) => (
+                <tr
+                  key={cohort.id}
+                  onClick={() => navigate(`/cohort/${cohort.id}`)}
+                  className={`${styles.clickableRow} ${cohort.hasConditions ? styles.hasConditions : ''}`}
+                >
+                  {/* ID */}
+                  <td className={styles.idCell}>{cohort.id}</td>
 
+                  {/* Policy / Conditions */}
+                  <td className={styles.policyCell}>
+                    {cohort.hasConditions ? (
+                      <div className={styles.policyContent}>
+                        <div className={styles.typeTags}>
+                          {cohort.leafTypes.map((t) => (
+                            <span
+                              key={t}
+                              className={styles.typeTag}
+                              style={{ color: TYPE_COLOR[t] || '#999', borderColor: TYPE_COLOR[t] || '#999' }}
+                            >
+                              {TYPE_LABEL[t] || t}
+                            </span>
+                          ))}
+                          {cohort.complexityScore > 3 && (
+                            <span className={styles.complexityHint}>+{cohort.complexityScore - 3} more</span>
+                          )}
+                        </div>
+                        {cohort.policySummary && (
+                          <div className={styles.policySummary}>{cohort.policySummary}</div>
+                        )}
+                      </div>
+                    ) : (
+                      <span className={styles.noConditions}>No conditions set</span>
+                    )}
+                  </td>
+
+                  {/* Nodes */}
+                  <td className={styles.nodesCell}>
+                    <span className={styles.nodeCount}>{cohort.signersCount}</span>
+                    {cohort.chainId && (
+                      <span className={styles.chainBadge}>{chainLabel(cohort.chainId)}</span>
+                    )}
+                  </td>
+
+                  {/* Threshold */}
+                  <td className={styles.thresholdCell}>
+                    {cohort.threshold
+                      ? `${cohort.threshold} of ${cohort.signersCount}`
+                      : cohort.signersCount
+                      ? `— of ${cohort.signersCount}`
+                      : '—'}
+                  </td>
+
+                  {/* State */}
+                  <td className={styles.stateCell}>
+                    <span className={`${styles.stateBadge} ${styles['state_' + (cohort.state || '').replace(/\s+/g, '_').toLowerCase()]}`}>
+                      {cohort.state || 'Unknown'}
+                    </span>
+                  </td>
+
+                  {/* Executions */}
+                  <td className={styles.numericCell}>
+                    {cohort.executionCount > 0 ? (
+                      <span className={styles.executionBadge}>{cohort.executionCount}</span>
+                    ) : (
+                      <span className={styles.zeroValue}>—</span>
+                    )}
+                  </td>
+
+                  {/* Created */}
+                  <td className={styles.ageCell}>
+                    {cohort.createdAt
+                      ? calculateTimeMoment(parseInt(cohort.createdAt) * 1000)
+                      : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

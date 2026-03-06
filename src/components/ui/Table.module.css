@@ -30,14 +30,14 @@
 }
 
 .tableRow.selected {
-  border-left: 3px solid var(--color-primary-accent, #96FF5E);
-  background-color: rgba(150, 255, 94, 0.05);
+  border-left: 3px solid var(--color-primary-accent, #4ADE80);
+  background-color: rgba(74, 222, 128, 0.05);
 }
 
 .tableCell {
-  padding: 12px 16px;
+  padding: 6px 10px;
   color: var(--color-secondary-text, #5A5A5A);
-  font-size: 14px;
+  font-size: 12px;
   border-bottom: 1px solid var(--color-border-default, #E5E7EB);
 }
 
@@ -45,7 +45,7 @@
   font-weight: 700;
   color: var(--color-primary-text, #0A0A0A);
   text-transform: uppercase;
-  font-size: 12px;
+  font-size: 10px;
   letter-spacing: 0.5px;
 }
 
@@ -66,7 +66,7 @@
 }
 
 .paddingNormal {
-  padding: 12px 16px;
+  padding: 6px 10px;
 }
 
 .paddingCheckbox {
@@ -90,16 +90,16 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding: 8px 16px;
-  min-height: 52px;
+  padding: 6px 12px;
+  min-height: 36px;
 }
 
 .rowsPerPage {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-right: 32px;
-  font-size: 14px;
+  gap: 6px;
+  margin-right: 20px;
+  font-size: 12px;
   color: var(--color-secondary-text, #5A5A5A);
 }
 
@@ -116,20 +116,20 @@
 }
 
 .select:hover {
-  border-color: var(--color-primary-accent, #96FF5E);
+  border-color: var(--color-primary-accent, #4ADE80);
   background-color: var(--color-tertiary-bg, #F4F4F4);
 }
 
 .select:focus {
   outline: none;
-  border-color: var(--color-primary-accent, #96FF5E);
-  box-shadow: 0 0 0 2px rgba(150, 255, 94, 0.2);
+  border-color: var(--color-primary-accent, #4ADE80);
+  box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.2);
 }
 
 .displayedRows {
-  font-size: 14px;
+  font-size: 12px;
   color: var(--color-secondary-text, #5A5A5A);
-  margin-right: 32px;
+  margin-right: 20px;
 }
 
 .paginationActions {
@@ -154,7 +154,7 @@
 
 .paginationButton:hover:not(:disabled) {
   background-color: var(--color-tertiary-bg, #F4F4F4);
-  border-color: var(--color-primary-accent, #96FF5E);
+  border-color: var(--color-primary-accent, #4ADE80);
   color: var(--color-primary-text, #0A0A0A);
 }
 
@@ -177,7 +177,7 @@
 }
 
 .tableSortLabel:hover {
-  color: var(--color-primary-accent, #96FF5E);
+  color: var(--color-primary-accent, #4ADE80);
 }
 
 .tableSortLabel.active {
@@ -199,5 +199,5 @@
 
 .tableSortLabel.active .sortIcon {
   opacity: 1;
-  color: var(--color-primary-accent, #96FF5E);
+  color: var(--color-primary-accent, #4ADE80);
 }

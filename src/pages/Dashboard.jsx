@@ -1,457 +1,310 @@
-import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
-import { getRituals, getNodes, formatRitualsData, formatNodes, getTimeout, formatTimeToText } from './data';
+import React, { useState, useEffect, useRef } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import {
+  getRituals, getNodes, formatRitualsData, formatNodes,
+  getTimeout, getLiveRitualIds, calculateTimeMoment, formatString,
+  getSigningCohortsFromSubgraph,
+} from './data';
 import styles from './Dashboard.module.css';
+import { SkeletonRows } from '../components/Skeleton';
 
-const Dashboard = () => {
-  const [stats, setStats] = useState({
-    totalRituals: 0,
-    activeRituals: 0,
-    totalNodes: 0,
-    activeNodes: 0,
-    successRate: '0%'
-  });
+// ── Status helpers ──────────────────────────────────────────────────────────
+const ritualStatusClass = (s) => {
+  const u = (s || '').toUpperCase();
+  if (u === 'SUCCESSFUL') return styles.status_successful;
+  if (u === 'ACTIVE') return styles.status_active;
+  if (u.includes('AWAITING')) return styles.status_awaiting;
+  if (u === 'EXPIRED') return styles.status_expired;
+  if (u.includes('TIME') || u.includes('INVALID') || u.includes('ERROR') || u === 'TIMEOUT') return styles.status_timeout;
+  return '';
+};
 
-  const [recentRituals, setRecentRituals] = useState([]);
-  const [recentActivity, setRecentActivity] = useState([]);
-  const [loading, setLoading] = useState(true);
+const STATUS_SHORT = {
+  SUCCESSFUL: 'OK', ACTIVE: 'Active',
+  'DKG AWAITING TRANSCRIPTS': 'Await TX', 'DKG AWAITING AGGREGATIONS': 'Await Agg',
+  EXPIRED: 'Expired', 'TIME OUT': 'Timeout', TIMEOUT: 'Timeout',
+  'DKG INVALID': 'Invalid', 'DKG ERROR': 'Error',
+};
+
+const CHAIN_NAMES = { '1': 'Ethereum', '137': 'Polygon', '8453': 'Base', '11155111': 'Sepolia', '84532': 'Base Sep', '80002': 'Amoy' };
+const chainName = (id) => CHAIN_NAMES[String(id)] || `Chain ${id}`;
+
+const cohortStatusClass = (s) => {
+  if (!s) return '';
+  const u = s.toUpperCase();
+  if (u === 'DEPLOYED' || u === 'CONDITIONS_SET') return styles.cohort_active;
+  if (u === 'PENDING') return styles.cohort_pending;
+  return styles.cohort_inactive;
+};
+
+const cohortStatusLabel = (s) => (s || '').replace(/_/g, ' ');
+
+// ── Heatmap ──────────────────────────────────────────────────────────────────
+const HEATMAP_COLOR = {
+  SUCCESSFUL: '#22c55e', ACTIVE: '#4ade80',
+  'DKG AWAITING TRANSCRIPTS': '#f59e0b', 'DKG AWAITING AGGREGATIONS': '#f59e0b',
+  EXPIRED: '#f97316', 'TIME OUT': '#dc2626', TIMEOUT: '#dc2626',
+  'DKG INVALID': '#dc2626', 'DKG ERROR': '#dc2626',
+};
+
+function RitualHeatmap({ rituals }) {
+  const wrapRef = useRef(null);
+  const [cols, setCols] = useState(80);
+  const ROWS = 8, SQ = 5, GAP = 2, STRIDE = 7;
 
   useEffect(() => {
-    fetchDashboardData();
+    if (!wrapRef.current) return;
+    const update = () => setCols(Math.max(1, Math.floor((wrapRef.current.offsetWidth + GAP) / STRIDE)));
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(wrapRef.current);
+    return () => ro.disconnect();
   }, []);
 
-  const fetchDashboardData = async () => {
-    try {
-      const [ritualsData, nodesData, timeout] = await Promise.all([
-        getRituals(false, ''),  // Not searching, empty search input
-        getNodes(false, ''),     // Not searching, empty search input
-        getTimeout()
-      ]);
-
-      // getRituals returns an object with rituals property
-      const rituals = ritualsData?.rituals ? ritualsData.rituals : [];
-      const ritualCounter = ritualsData?.ritualCounter;
-      // getNodes returns an object with appAuthorizations property
-      const rawNodes = nodesData?.appAuthorizations ? nodesData.appAuthorizations : [];
-
-      // Format both rituals and nodes data for display
-      const formattedRituals = formatRitualsData(rituals, timeout);
-      const { nodes } = await formatNodes(rawNodes);
-
-      // Calculate real statistics (excluding heartbeats)
-      const nonHeartbeatRituals = formattedRituals.filter(r => r.totalParticipants > 3);
-      // Use the actual total from ritualCounter if available, otherwise use formatted length
-      const totalRituals = nonHeartbeatRituals.length;
-      const activeRituals = nonHeartbeatRituals.filter(r => r.status === 'ACTIVE').length;
-      const successfulRituals = nonHeartbeatRituals.filter(r => r.status === 'SUCCESSFUL').length;
-      const totalNodes = nodes.length;
-      
-      // Calculate active nodes - let's try different approaches
-      const eightWeeksAgo = Date.now() - (56 * 24 * 60 * 60 * 1000); // 8 weeks in milliseconds
-      const fourWeeksAgo = Date.now() - (28 * 24 * 60 * 60 * 1000); // 4 weeks in milliseconds
-      const twoWeeksAgo = Date.now() - (14 * 24 * 60 * 60 * 1000); // 2 weeks in milliseconds
-      const twoMonthsAgo = Date.now() - (60 * 24 * 60 * 60 * 1000); // 2 months in milliseconds
-      
-      // Try with 2 months timeframe for better coverage
-      const twoMonthRituals = formattedRituals.filter(r => 
-        (r.status === 'SUCCESSFUL' || r.status === 'ACTIVE') && 
-        r.updateTime > twoMonthsAgo
-      );
-      
-      // Use 8 weeks as the primary timeframe for active nodes (excluding heartbeats)
-      const recentActiveOrSuccessfulRituals = nonHeartbeatRituals.filter(r => 
-        (r.status === 'SUCCESSFUL' || r.status === 'ACTIVE') && 
-        r.updateTime > eightWeeksAgo // Using 8 weeks for better coverage
-      );
-      
-      // For comparison, let's keep different timeframe calculations
-      const twoWeekRituals = nonHeartbeatRituals.filter(r => 
-        (r.status === 'SUCCESSFUL' || r.status === 'ACTIVE') && 
-        r.updateTime > twoWeeksAgo
-      );
-      
-      const recentSuccessfulRituals = nonHeartbeatRituals.filter(r => 
-        r.status === 'SUCCESSFUL' && 
-        r.updateTime > twoWeeksAgo
-      );
-      
-      // Also get ALL successful or active rituals (no time limit) to see maximum participation
-      const allSuccessfulOrActiveRituals = nonHeartbeatRituals.filter(r => 
-        r.status === 'SUCCESSFUL' || r.status === 'ACTIVE'
-      );
-      
-      // Create a map of confirmed node addresses with participation counts
-      const confirmedNodeParticipations = new Map();
-      
-      // Initialize map with all confirmed nodes (participation count = 0)
-      nodes.forEach(node => {
-        if (node.isOperatorConfirmed) {
-          confirmedNodeParticipations.set(node.id.toLowerCase(), {
-            nodeInfo: node,
-            participationCount: 0,
-            recentParticipationCount: 0,
-            lastParticipationTime: null
-          });
-        }
-      });
-      
-      console.log(`Initialized map with ${confirmedNodeParticipations.size} confirmed nodes`);
-      
-      // Count participations in successful/active rituals within 8-week window
-      recentActiveOrSuccessfulRituals.forEach(ritual => {
-        if (ritual.participants && Array.isArray(ritual.participants)) {
-          ritual.participants.forEach(participant => {
-            const participantId = participant.toLowerCase();
-            if (confirmedNodeParticipations.has(participantId)) {
-              const nodeData = confirmedNodeParticipations.get(participantId);
-              nodeData.recentParticipationCount++;
-              if (!nodeData.lastParticipationTime || ritual.updateTime > nodeData.lastParticipationTime) {
-                nodeData.lastParticipationTime = ritual.updateTime;
-              }
-            }
-          });
-        }
-      });
-      
-      // Count ALL-TIME participations for comparison
-      allSuccessfulOrActiveRituals.forEach(ritual => {
-        if (ritual.participants && Array.isArray(ritual.participants)) {
-          ritual.participants.forEach(participant => {
-            const participantId = participant.toLowerCase();
-            if (confirmedNodeParticipations.has(participantId)) {
-              const nodeData = confirmedNodeParticipations.get(participantId);
-              nodeData.participationCount++;
-            }
-          });
-        }
-      });
-      
-      // Calculate active nodes (those with at least 1 participation in 8 weeks)
-      let activeNodes = 0;
-      let allTimeActiveNodes = 0;
-      const participationDistribution = { zero: 0, low: 0, medium: 0, high: 0 };
-      
-      confirmedNodeParticipations.forEach((nodeData, nodeId) => {
-        if (nodeData.recentParticipationCount > 0) {
-          activeNodes++;
-        }
-        if (nodeData.participationCount > 0) {
-          allTimeActiveNodes++;
-        }
-        
-        // Track participation distribution
-        if (nodeData.recentParticipationCount === 0) {
-          participationDistribution.zero++;
-        } else if (nodeData.recentParticipationCount <= 10) {
-          participationDistribution.low++;
-        } else if (nodeData.recentParticipationCount <= 50) {
-          participationDistribution.medium++;
-        } else {
-          participationDistribution.high++;
-        }
-      });
-      
-      const totalConfirmedNodes = confirmedNodeParticipations.size;
-      
-      // Get top participants for debugging
-      const topParticipants = Array.from(confirmedNodeParticipations.entries())
-        .sort((a, b) => b[1].recentParticipationCount - a[1].recentParticipationCount)
-        .slice(0, 5)
-        .map(([id, data]) => ({
-          id: id.slice(0, 10) + '...',
-          recentCount: data.recentParticipationCount,
-          allTimeCount: data.participationCount
-        }));
-      
-      console.log(`Active nodes calculation (Map-based approach):
-        === Ritual Counts ===
-        - Recent rituals (2 weeks): ${twoWeekRituals.length}
-        - Recent rituals (8 weeks): ${recentActiveOrSuccessfulRituals.length}
-        - ALL successful+active rituals: ${allSuccessfulOrActiveRituals.length}
-        
-        === Node Participation ===
-        - Total confirmed nodes: ${totalConfirmedNodes}
-        - Active nodes (8 weeks, ≥1 participation): ${activeNodes}
-        - Active nodes (all time, ≥1 participation): ${allTimeActiveNodes}
-        - Inactive nodes (8 weeks): ${participationDistribution.zero}
-        
-        === Participation Distribution (8 weeks) ===
-        - No participation: ${participationDistribution.zero} nodes
-        - Low (1-10 rituals): ${participationDistribution.low} nodes
-        - Medium (11-50 rituals): ${participationDistribution.medium} nodes
-        - High (>50 rituals): ${participationDistribution.high} nodes
-        
-        === Activity Rates ===
-        - Activity rate (8 weeks): ${totalConfirmedNodes > 0 ? ((activeNodes / totalConfirmedNodes) * 100).toFixed(1) : 0}%
-        - Activity rate (all time): ${totalConfirmedNodes > 0 ? ((allTimeActiveNodes / totalConfirmedNodes) * 100).toFixed(1) : 0}%
-        - Expected ~95% would be: ${Math.round(totalConfirmedNodes * 0.95)} nodes
-        
-        === Top Participants (8 weeks) ===`);
-      console.log('Top 5 most active nodes:', topParticipants);
-        
-      
-      
-      // Calculate success rate (successful rituals / total rituals)
-      const successRate = totalRituals > 0 
-        ? ((successfulRituals / totalRituals) * 100).toFixed(1) + '%'
-        : '0%';
-
-
-
-
-      setStats({
-        totalRituals,
-        activeRituals: activeRituals + successfulRituals, // Show active + successful as "active"
-        totalNodes,
-        activeNodes: allTimeActiveNodes, // Use all-time active nodes for display (91.5% rate)
-        successRate
-      });
-
-      // Get recent rituals for the table (already filtered above)
-      setRecentRituals(nonHeartbeatRituals.slice(0, 10));
-
-      // Generate network activity summary from ritual data
-      const now = Date.now();
-      const oneHourAgo = now - (60 * 60 * 1000);
-      const twentyFourHoursAgo = now - (24 * 60 * 60 * 1000);
-      const sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000);
-      
-      // Calculate activity metrics
-      const lastHourRituals = formattedRituals.filter(r => r.updateTime > oneHourAgo).length;
-      const last24HoursRituals = formattedRituals.filter(r => r.updateTime > twentyFourHoursAgo).length;
-      const lastWeekRituals = formattedRituals.filter(r => r.updateTime > sevenDaysAgo).length;
-      
-      const last24HoursSuccessful = formattedRituals.filter(r => 
-        r.updateTime > twentyFourHoursAgo && r.status === 'SUCCESSFUL'
-      ).length;
-      
-      const last24HoursActive = formattedRituals.filter(r => 
-        r.updateTime > twentyFourHoursAgo && r.status === 'ACTIVE'
-      ).length;
-      
-      // Get unique authorities from recent rituals
-      const recentAuthorities = new Set(
-        formattedRituals
-          .filter(r => r.updateTime > twentyFourHoursAgo)
-          .map(r => r.authority)
-      ).size;
-      
-      // Average participants in recent successful rituals
-      const last24HSuccessfulRituals = formattedRituals.filter(r => 
-        r.updateTime > twentyFourHoursAgo && r.status === 'SUCCESSFUL'
-      );
-      const avgParticipants = last24HSuccessfulRituals.length > 0
-        ? Math.round(last24HSuccessfulRituals.reduce((sum, r) => sum + (r.totalParticipants || 0), 0) / last24HSuccessfulRituals.length)
-        : 0;
-      
-      // Create recent events from rituals
-      const recentEvents = [];
-      
-      // Get up to 10 recent rituals for events
-      const eventsFromRituals = formattedRituals.slice(0, 10);
-      
-      eventsFromRituals.forEach(ritual => {
-        // Add events based on ritual status
-        if (ritual.status === 'SUCCESSFUL' || ritual.status === 'ACTIVE') {
-          recentEvents.push({
-            event: 'DKG Round Complete',
-            ritual: `#${ritual.id}`,
-            participants: ritual.totalParticipants || 0,
-            time: ritual.updateTime,
-            status: 'success',
-            isHeartbeat: ritual.totalParticipants <= 3
-          });
-        } else if (ritual.status === 'DKG AWAITING TRANSCRIPTS') {
-          recentEvents.push({
-            event: 'Awaiting Transcripts',
-            ritual: `#${ritual.id}`,
-            participants: ritual.totalPostedTranscripts || 0,
-            time: ritual.updateTime,
-            status: 'pending',
-            isHeartbeat: ritual.totalParticipants <= 3
-          });
-        } else if (ritual.status === 'DKG AWAITING AGGREGATIONS') {
-          recentEvents.push({
-            event: 'Awaiting Aggregations',
-            ritual: `#${ritual.id}`,
-            participants: ritual.totalPostedAggregations || 0,
-            time: ritual.updateTime,
-            status: 'pending',
-            isHeartbeat: ritual.totalParticipants <= 3
-          });
-        } else if (ritual.status === 'EXPIRED' || ritual.status === 'TIME OUT') {
-          recentEvents.push({
-            event: ritual.status === 'EXPIRED' ? 'Ritual Expired' : 'Ritual Timeout',
-            ritual: `#${ritual.id}`,
-            participants: ritual.totalParticipants || 0,
-            time: ritual.updateTime,
-            status: 'failed',
-            isHeartbeat: ritual.totalParticipants <= 3
-          });
-        }
-      });
-      
-      // Sort by time and take top 5
-      recentEvents.sort((a, b) => new Date(b.time) - new Date(a.time));
-      setRecentActivity(recentEvents.slice(0, 5));
-
-      setLoading(false);
-    } catch (error) {
-      console.error('Failed to fetch dashboard data:', error);
-      setLoading(false);
-    }
-  };
-
-  const StatCard = ({ title, value, subtitle, change, trend }) => (
-    <div className={styles.statCard}>
-      <div className={styles.statHeader}>
-        <span className={styles.statTitle}>{title}</span>
-        {change && (
-          <span className={`${styles.statChange} ${trend === 'up' ? styles.up : styles.down}`}>
-            {trend === 'up' ? '↑' : '↓'} {change}
-          </span>
-        )}
-      </div>
-      <div className={styles.statValue}>{value}</div>
-      {subtitle && <div className={styles.statSubtitle}>{subtitle}</div>}
-    </div>
-  );
+  const total = ROWS * cols;
+  const sorted = [...rituals].sort((a, b) => (a.initTimeStamp || 0) - (b.initTimeStamp || 0)).slice(-total);
+  const svgW = cols * STRIDE - GAP;
+  const svgH = ROWS * STRIDE - GAP;
+  const getColor = (s) => HEATMAP_COLOR[(s || '').toUpperCase()] || '#d1d5db';
+  const offset = total - sorted.length;
 
   return (
-    <div className={styles.dashboard}>
+    <div ref={wrapRef} className={styles.heatmapSvgWrap}>
+      <svg width="100%" height={svgH} viewBox={`0 0 ${svgW} ${svgH}`}
+        preserveAspectRatio="xMinYMid meet" style={{ display: 'block' }}>
+        {sorted.map((r, idx) => {
+          const pos = offset + idx;
+          const ageRatio = idx / Math.max(sorted.length - 1, 1);
+          return (
+            <rect key={r.id} x={(pos % cols) * STRIDE} y={Math.floor(pos / cols) * STRIDE}
+              width={SQ} height={SQ} rx={1} fill={getColor(r.status)}
+              opacity={0.25 + ageRatio * 0.65} style={{ cursor: 'pointer' }}
+              onClick={() => window.location.href = `/rituals/${r.id}`}>
+              <title>#{r.id} · {r.status} · {r.totalParticipants} nodes</title>
+            </rect>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+const Dashboard = () => {
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(true);
+  const [cohortsLoading, setCohortsLoading] = useState(true);
+  const [stats, setStats] = useState(null);
+  const [recentRituals, setRecentRituals] = useState([]);
+  const [allRituals, setAllRituals] = useState([]);
+  const [recentCohorts, setRecentCohorts] = useState([]);
+  const [cohortStats, setCohortStats] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [ritualsData, nodesData, timeout, liveIds] = await Promise.all([
+          getRituals(false, ''),
+          getNodes(false, ''),
+          getTimeout(),
+          getLiveRitualIds().catch(() => new Set()),
+        ]);
+        const rawRituals = ritualsData?.rituals || [];
+        const formatted = formatRitualsData(rawRituals, timeout, liveIds);
+        const regular = formatted.filter(r => !r.isHeartbeat);
+        const successful = regular.filter(r => r.status === 'SUCCESSFUL' || r.status === 'ACTIVE').length;
+        const { nodes } = await formatNodes(nodesData?.appAuthorizations || []);
+        setStats({
+          totalNodes: nodes.length,
+          confirmedNodes: nodes.filter(n => n.isOperatorConfirmed).length,
+          regularRituals: regular.length,
+          successRate: regular.length > 0 ? ((successful / regular.length) * 100).toFixed(1) : '0',
+        });
+        setAllRituals(formatted);
+        setRecentRituals(regular.slice(0, 12));
+      } catch (err) {
+        console.error('Dashboard rituals:', err);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const cohorts = await getSigningCohortsFromSubgraph();
+        const deployed = cohorts.filter(c => c.status === 'DEPLOYED' || c.status === 'CONDITIONS_SET').length;
+        const withConditions = cohorts.filter(c => c.conditions && c.conditions !== '0x').length;
+        const totalSignatures = cohorts.reduce((sum, c) => sum + (c.signatures?.length || 0), 0);
+        setCohortStats({ total: cohorts.length, deployed, withConditions, totalSignatures });
+        setRecentCohorts(cohorts.slice(0, 12));
+      } catch (err) {
+        console.error('Dashboard cohorts:', err);
+      } finally {
+        setCohortsLoading(false);
+      }
+    })();
+  }, []);
+
+  return (
+    <div className={styles.page}>
       <div className={styles.container}>
-        {/* Network Overview Section */}
-        <section className={styles.networkOverview}>
-          <div className={styles.overviewCard}>
-            <div className={styles.overviewHeader}>
-              <h2 className={styles.overviewTitle}>TACo Network Overview</h2>
-              <span className={styles.networkStatus}>
-                <span className={styles.statusDot}></span>
-                Network Operational
-              </span>
+
+        {/* ── Hero ── */}
+        <div className={styles.hero}>
+          <div className={styles.accentBar}>
+            {!loading && stats && (
+              <div className={styles.accentFill} style={{ width: `${stats.successRate}%` }} />
+            )}
+          </div>
+
+          <div className={styles.heroTop}>
+            <div className={styles.heroTitleGroup}>
+              <span className={styles.heroNet}>TACo Network</span>
+              <span className={styles.statusPill}>● Operational</span>
             </div>
-            <div className={styles.overviewStats}>
-              <div className={styles.overviewStat}>
-                <span className={styles.overviewLabel}>ACTIVE RITUALS</span>
-                <span className={styles.overviewValue}>{stats.activeRituals}</span>
-                <span className={styles.overviewChange}>of {stats.totalRituals} total</span>
-              </div>
-              <div className={styles.overviewStat}>
-                <span className={styles.overviewLabel}>NODE OPERATORS</span>
-                <span className={styles.overviewValue}>{stats.activeNodes}</span>
-                <span className={styles.overviewSubtext}>active</span>
-              </div>
-              <div className={styles.overviewStat}>
-                <span className={styles.overviewLabel}>SUCCESS RATE</span>
-                <span className={styles.overviewValue}>{stats.successRate}</span>
-              </div>
+            <div className={styles.heroStats}>
+              {loading ? (
+                [60, 80, 64].map((w, i) => (
+                  <span key={i} className={styles.shimmer} style={{ width: w, height: 20, borderRadius: 3 }} />
+                ))
+              ) : stats && (<>
+                <div className={styles.heroStat}>
+                  <span className={styles.heroVal}>{stats.totalNodes}</span>
+                  <span className={styles.heroLbl}>nodes</span>
+                </div>
+                <div className={styles.heroDivider} />
+                <div className={styles.heroStat}>
+                  <span className={styles.heroVal}>{stats.regularRituals.toLocaleString()}</span>
+                  <span className={styles.heroLbl}>rituals</span>
+                </div>
+                <div className={styles.heroDivider} />
+                <div className={styles.heroStat}>
+                  <span className={`${styles.heroVal} ${styles.heroValGreen}`}>{stats.successRate}%</span>
+                  <span className={styles.heroLbl}>success</span>
+                </div>
+                {cohortStats && cohortStats.totalSignatures > 0 && (<>
+                  <div className={styles.heroDivider} />
+                  <div className={styles.heroStat}>
+                    <span className={`${styles.heroVal} ${styles.heroValGreen}`}>
+                      {cohortStats.totalSignatures.toLocaleString()}
+                    </span>
+                    <span className={styles.heroLbl}>signatures</span>
+                  </div>
+                </>)}
+              </>)}
             </div>
           </div>
-        </section>
 
+          {loading ? (
+            <div className={styles.shimmer} style={{ height: 58, borderRadius: 4, display: 'block', width: '100%' }} />
+          ) : (
+            <>
+              <RitualHeatmap rituals={allRituals} />
+              <div className={styles.heatmapLegend}>
+                {[['#22c55e','Successful'],['#f59e0b','Pending'],['#dc2626','Failed']].map(([color, label]) => (
+                  <span key={label} className={styles.legendItem}>
+                    <svg width={7} height={7} style={{ flexShrink: 0 }}>
+                      <rect width={7} height={7} rx={1} fill={color} opacity={0.85} />
+                    </svg>
+                    {label}
+                  </span>
+                ))}
+                <span className={styles.legendRight}>← older · newer →</span>
+              </div>
+            </>
+          )}
+        </div>
 
-        {/* Recent Activity Tables */}
-        <section className={styles.recentActivity}>
-          <div className={styles.tableSection}>
-            <div className={styles.tableHeader}>
-              <h3 className={styles.tableTitle}>Latest DKG Rituals</h3>
-              <Link to="/rituals" className={styles.viewAllLink}>View All →</Link>
+        {/* ── Main grid: Rituals + Cohorts + Explore ── */}
+        <div className={styles.mainGrid}>
+
+          {/* Recent DKG Rituals */}
+          <div className={styles.card}>
+            <div className={styles.cardHeader}>
+              <span className={styles.cardTitle}>Recent DKG Rituals</span>
+              <Link to="/rituals" className={styles.viewAll}>View all →</Link>
             </div>
-            <div className={styles.tableWrapper}>
-              <table className={styles.dataTable}>
-                <thead>
-                  <tr>
-                    <th>Ritual ID</th>
-                    <th>Status</th>
-                    <th>Authority</th>
-                    <th>Participants</th>
-                    <th>Age</th>
+            <table className={styles.table}>
+              <thead><tr><th>#</th><th>Status</th><th>Authority</th><th>Nodes</th><th>Age</th></tr></thead>
+              <tbody>
+                {loading ? <SkeletonRows rows={8} cols={5} /> : recentRituals.map(r => (
+                  <tr key={r.id} className={styles.clickableRow} onClick={() => navigate(`/rituals/${r.id}`)}>
+                    <td className={styles.idCell}>{r.id}</td>
+                    <td><span className={`${styles.statusBadge} ${ritualStatusClass(r.status)}`}>{STATUS_SHORT[r.status] || r.status}</span></td>
+                    <td className={styles.addrCell}>{formatString(r.authority)}</td>
+                    <td className={styles.numCell}>{r.totalParticipants}</td>
+                    <td className={styles.ageCell}>{calculateTimeMoment(r.updateTime)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {recentRituals.map(ritual => (
-                    <tr key={ritual.id}>
-                      <td>
-                        <Link to={`/ritual/${ritual.id}`} className={styles.idLink} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          #{ritual.id}
-                          {ritual.totalParticipants <= 3 && (
-                            <span style={{
-                              background: 'rgba(107, 114, 128, 0.1)',
-                              color: '#6B7280',
-                              padding: '2px 6px',
-                              borderRadius: '4px',
-                              fontSize: '10px',
-                              fontWeight: 500,
-                              fontFamily: 'var(--font-mono)',
-                              letterSpacing: '0.025em'
-                            }}>
-                              HB
-                            </span>
-                          )}
-                        </Link>
-                      </td>
-                      <td>
-                        <span className={`${styles.status} ${styles[ritual.status?.toLowerCase()?.replace(/\s/g, '_')]}`}>
-                          {ritual.status}
-                        </span>
-                      </td>
-                      <td>
-                        <Link to={`/address/${ritual.authority}`} className={styles.addressLink}>
-                          {ritual.authority?.slice(0, 6)}...{ritual.authority?.slice(-4)}
-                        </Link>
-                      </td>
-                      <td>{ritual.totalParticipants || 0}</td>
-                      <td className={styles.age}>{formatTimeToText(ritual.updateTime)}</td>
+                ))}
+                {!loading && recentRituals.length === 0 && (
+                  <tr><td colSpan={5} className={styles.emptyRow}>No rituals found</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Signing Cohorts */}
+          <div className={styles.card}>
+            <div className={styles.cardHeader}>
+              <div className={styles.cardHeaderLeft}>
+                <span className={styles.cardTitle}>Signing Cohorts</span>
+                {cohortStats && (
+                  <span className={styles.cardMeta}>
+                    {cohortStats.deployed} deployed · {cohortStats.withConditions} with conditions
+                  </span>
+                )}
+              </div>
+              <Link to="/cohorts" className={styles.viewAll}>View all →</Link>
+            </div>
+            <table className={styles.table}>
+              <thead><tr><th>ID</th><th>Status</th><th>Threshold</th><th>Chain</th><th>Age</th></tr></thead>
+              <tbody>
+                {cohortsLoading ? <SkeletonRows rows={8} cols={5} /> : recentCohorts.map(c => {
+                  const signers = c.multisig?.signers?.length || c.signers?.length || c.participants?.length || 0;
+                  const threshold = c.multisig?.threshold || c.threshold || 0;
+                  return (
+                    <tr key={c.id} className={styles.clickableRow} onClick={() => navigate(`/cohorts/${c.id}`)}>
+                      <td className={styles.idCell}>#{c.id}</td>
+                      <td><span className={`${styles.statusBadge} ${cohortStatusClass(c.status)}`}>{cohortStatusLabel(c.status)}</span></td>
+                      <td className={styles.dimCell}>{threshold ? `${threshold} of ${signers}` : `— of ${signers}`}</td>
+                      <td className={styles.chainCell}>{chainName(c.chainId)}</td>
+                      <td className={styles.ageCell}>{c.createdAt ? calculateTimeMoment(parseInt(c.createdAt) * 1000) : '—'}</td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  );
+                })}
+                {!cohortsLoading && recentCohorts.length === 0 && (
+                  <tr><td colSpan={5} className={styles.emptyRow}>No cohorts found</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Explore */}
+          <div className={styles.card}>
+            <div className={styles.cardHeader}>
+              <span className={styles.cardTitle}>Explore</span>
+            </div>
+            <div className={styles.sectionLinks}>
+              {[
+                { path: '/nodes',       label: 'Node Operators',   desc: 'Authorized staking providers' },
+                { path: '/cohorts',     label: 'Signing Cohorts',  desc: 'Threshold signing groups' },
+                { path: '/heartbeats',  label: 'Heartbeats',       desc: 'Weekly DKG health checks' },
+                { path: '/rewards',     label: 'Rewards',          desc: 'T token distributions' },
+                { path: '/infractions', label: 'Infractions',      desc: 'Missed transcripts & penalties' },
+                { path: '/activity',    label: 'Protocol Events',  desc: 'Cross-chain event feed' },
+              ].map(s => (
+                <Link key={s.path} to={s.path} className={styles.sectionLink}>
+                  <span className={styles.sectionLinkLabel}>{s.label}</span>
+                  <span className={styles.sectionLinkDesc}>{s.desc}</span>
+                  <span className={styles.sectionLinkArrow}>→</span>
+                </Link>
+              ))}
             </div>
           </div>
 
-          <div className={styles.tableSection}>
-            <div className={styles.tableHeader}>
-              <h3 className={styles.tableTitle}>Recent Network Events</h3>
-              <Link to="/activity" className={styles.viewAllLink}>View All Events →</Link>
-            </div>
-            <div className={styles.tableWrapper}>
-              <table className={styles.dataTable}>
-                <thead>
-                  <tr>
-                    <th>Event</th>
-                    <th>Ritual</th>
-                    <th>Participants</th>
-                    <th>Time</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recentActivity.map((event, idx) => (
-                    <tr key={idx}>
-                      <td>
-                        <span className={styles.method}>{event.event}</span>
-                      </td>
-                      <td>
-                        <Link to={`/ritual/${event.ritual.replace('#', '')}`} className={styles.idLink}>
-                          {event.ritual}
-                        </Link>
-                      </td>
-                      <td>{event.participants}</td>
-                      <td className={styles.age}>{formatTimeToText(event.time)}</td>
-                      <td>
-                        <span className={`${styles.status} ${styles[event.status]}`}>
-                          {event.status === 'success' ? 'Success' : 
-                           event.status === 'pending' ? 'Pending' : 'Failed'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-
+        </div>
       </div>
     </div>
   );
