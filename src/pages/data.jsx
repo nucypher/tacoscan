@@ -1276,7 +1276,7 @@ export const getNodes = async (isSearch, searchInput) => {
   try {
     let stakingProviders;
     if (!isSearch) {
-      const data = await gqlFetch(SUBGRAPH_ETHEREUM, `
+      const data = await gqlFetch(SUBGRAPH_POLYGON, `
         query { stakingProviders(first: 1000, orderBy: authorized, orderDirection: desc) {
           id operator authorized deauthorizing endDeauthorization startTimestamp
           isReleased isSlashed isPenalized totalRewards totalRewardsWithdrawn
@@ -1286,7 +1286,7 @@ export const getNodes = async (isSearch, searchInput) => {
       stakingProviders = data.stakingProviders;
     } else {
       const search = searchInput.toLowerCase();
-      const data = await gqlFetch(SUBGRAPH_ETHEREUM, `
+      const data = await gqlFetch(SUBGRAPH_POLYGON, `
         query SearchStakers($id: ID!, $address: Bytes) {
           stakingProviders(where: { or: [{ id: $id }, { operator: $address }] }) {
             id operator authorized deauthorizing startTimestamp
@@ -1309,7 +1309,7 @@ export const getNodeDetail = async (node) => {
   try {
     const nodeAddress = node.toLowerCase();
 
-    const data = await gqlFetch(SUBGRAPH_ETHEREUM, `
+    const data = await gqlFetch(SUBGRAPH_POLYGON, `
       query StakerDetail($id: ID!) {
         stakingProvider(id: $id) {
           id operator previousOperator authorized deauthorizing endDeauthorization startTimestamp
